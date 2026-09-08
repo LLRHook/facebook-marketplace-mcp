@@ -28,6 +28,12 @@ export interface MarketplaceListing {
   postedDate: string;
   url: string;
   isPending: boolean;
+  isSold?: boolean;
+  priceAmount?: number | null;
+  currency?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  deliveryTypes?: string[];
 }
 
 export interface MarketplaceListingDetail extends MarketplaceListing {
@@ -50,6 +56,7 @@ export interface SearchParams {
   category?: string;
   limit: number;
   cursor?: string;
+  delivery?: "all" | "local_pickup" | "shipping";
 }
 
 export interface SearchResult {

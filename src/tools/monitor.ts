@@ -121,7 +121,7 @@ export function createCheckMonitorsHandler(client: FacebookClient) {
             .join("\n\n");
 
           results.push(
-            `### 🔔 ${monitor.name} — ${newListings.length} new listing(s)\n\n${listingSummary}`
+            `### 🔔 ${monitor.name} — ${newListings.length} listing(s) new to this monitor\n\n${listingSummary}`
           );
         } else {
           updateMonitorSeenIds(monitor.name, []);
@@ -130,7 +130,7 @@ export function createCheckMonitorsHandler(client: FacebookClient) {
       }
 
       return {
-        content: [{ type: "text" as const, text: results.join("\n\n---\n\n") }],
+        content: [{ type: "text" as const, text: `${results.join("\n\n---\n\n")}\n\nEach monitor checks one result page. Newly seen IDs are not necessarily newly posted listings; this does not provide complete or real-time alerts.` }],
       };
     } catch (error) {
       return {

@@ -16,6 +16,24 @@ const edge = { node: { listing } };
 const page = (payload: unknown) =>
   `<script type='application/json'>${JSON.stringify(payload)}</script>`;
 
+test("listing metadata keeps omitted coordinates and currency unknown", () => {
+  const result = parseSearchResponse({ data: { marketplace_search: { feed_units: { edges: [
+    { node: { ...listing, listing_price: { amount: "200.00", formatted_amount: "$200" },
+      delivery_types: ["IN_PERSON", 12], is_sold: true } },
+    { node: { ...listing, id: "456", location: { latitude: 0, longitude: 0 },
+      listing_price: { amount: "1,234.56", currency: "CAD" } } },
+  ] } } } });
+  assert.equal(result.listings[0].priceAmount, 200);
+  assert.equal(result.listings[0].currency, null);
+  assert.equal(result.listings[0].latitude, null);
+  assert.equal(result.listings[0].isSold, true);
+  assert.deepEqual(result.listings[0].deliveryTypes, ["IN_PERSON"]);
+  assert.equal(result.listings[1].latitude, 0);
+  assert.equal(result.listings[1].longitude, 0);
+  assert.equal(result.listings[1].priceAmount, null);
+  assert.equal(result.listings[1].currency, "CAD");
+});
+
 test("search handles moved listing connections and preserves valid entries", () => {
   const result = parseSearchResponse({ data: { viewer: { new_feed: {
     edges: [null, { node: { id: "story" } }, edge],
@@ -45,6 +63,19 @@ test("search recognizes Facebook's explicit no-results story", () => {
     story: { __typename: "EntMarketplaceSearchFeedNoResults" },
   } } });
   assert.equal(result.listings.length, 0);
+});
+
+test("a terminal search page can contain related searches and ads instead of listings", () => {
+  const response = (hasNext: boolean, endStory: boolean) => ({ data: { marketplace_search: { feed_units: {
+    edges: ["MarketplaceSearchRelatedSearchFeedUnit", "MarketplaceFeedAdStory",
+      ...(endStory ? ["MarketplaceSearchFeedEndOfResults"] : [])].map(__typename => ({ node: { __typename }, cursor: null })),
+    page_info: { has_next_page: hasNext, end_cursor: "last-cursor" },
+  } } } });
+  const result = parseSearchResponse(response(false, true));
+  assert.equal(result.hasNextPage, false);
+  assert.deepEqual(result.listings, []);
+  assert.throws(() => parseSearchResponse(response(true, true)), /no recognizable listings/);
+  assert.throws(() => parseSearchResponse(response(false, false)), /no recognizable listings/);
 });
 
 test("malformed optional dates do not discard a valid listing", () => {
@@ -115,6 +146,15 @@ test("an incomplete target never borrows fields from a neighboring listing", () 
 test("GraphQL listing details use the same target-specific normalization", () => {
   assert.equal(parseListingDetailResponse({ data: { node: listing } }, "123").title, "Desk");
   assert.throws(() => parseListingDetailResponse({ data: { node: listing } }, "456"));
+});
+
+test("detail map-center coordinates cannot masquerade as a seller pickup location", () => {
+  const detail = parseListingDetailResponse({ data: { node: { ...listing,
+    location: { latitude: 38.99893, longitude: -77.40202 }, location_text: { text: "Fredericksburg, VA" },
+  } } }, "123");
+  assert.equal(detail.location, "Fredericksburg, VA");
+  assert.equal(detail.latitude, null);
+  assert.equal(detail.longitude, null);
 });
 
 test("listing details resolve public product IDs and merge earlier internal-ID fragments", () => {

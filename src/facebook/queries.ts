@@ -32,7 +32,19 @@ export function buildSearchVariables(params: {
   category?: string;
   limit: number;
   cursor?: string;
+  delivery?: "all" | "local_pickup" | "shipping";
 }) {
+  // Live replay accepts whole kilometers; fractional radius values can return GraphQL errors.
+  const radiusKm = Math.ceil(params.radiusKm);
+  const minPriceCents = Math.round((params.minPrice ?? 0) * 100);
+  const maxPriceCents = params.maxPrice === undefined ? 214748364700 : Math.round(params.maxPrice * 100);
+  if (!Number.isSafeInteger(radiusKm) || params.radiusKm <= 0) {
+    throw new Error("Search radius must be positive and within the supported numeric range.");
+  }
+  if (!Number.isSafeInteger(minPriceCents) || !Number.isSafeInteger(maxPriceCents) ||
+      minPriceCents < 0 || maxPriceCents < minPriceCents) {
+    throw new Error("Search price bounds must be nonnegative, ordered and within the supported numeric range.");
+  }
   const variables: Record<string, unknown> = {
     count: params.limit,
     params: {
@@ -41,8 +53,8 @@ export function buildSearchVariables(params: {
         query: params.query,
       },
       browse_request_params: {
-        commerce_enable_local_pickup: true,
-        commerce_enable_shipping: true,
+        commerce_enable_local_pickup: params.delivery !== "shipping",
+        commerce_enable_shipping: params.delivery !== "local_pickup",
         commerce_search_and_rp_available: true,
         // Facebook sends an array here, not a scalar.
         commerce_search_and_rp_category_id: params.category
@@ -52,11 +64,9 @@ export function buildSearchVariables(params: {
         commerce_search_and_rp_ctime_days: null,
         filter_location_latitude: params.latitude,
         filter_location_longitude: params.longitude,
-        filter_price_lower_bound: (params.minPrice ?? 0) * 100,
-        filter_price_upper_bound: params.maxPrice !== undefined
-          ? params.maxPrice * 100
-          : 214748364700,
-        filter_radius_km: params.radiusKm,
+        filter_price_lower_bound: minPriceCents,
+        filter_price_upper_bound: maxPriceCents,
+        filter_radius_km: radiusKm,
       },
       custom_request_params: {
         browse_context: null,

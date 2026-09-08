@@ -38,8 +38,25 @@ try {
   local = await connect(storageEnv);
   await check('MCP initialization and tool discovery', async () => {
     const names = (await local.listTools()).tools.map(tool => tool.name).sort();
-    assert.deepEqual(names, ['check_monitors', 'delete_monitor', 'get_listing', 'list_monitors', 'monitor_search', 'search_listings', 'search_location']);
+    assert.deepEqual(names, ['calculate_trip_deal', 'check_monitors', 'delete_monitor', 'get_listing', 'list_monitors', 'monitor_search', 'search_listings', 'search_location']);
     return names;
+  });
+  await check('trip calculator works without a Facebook session', async () => {
+    const result = await local.callTool({ name: 'calculate_trip_deal', arguments: {
+      asking_price: 200, estimated_value: 381.73, round_trip_miles: 65.73,
+    } });
+    assert.notEqual(result.isError, true, content(result));
+    assert.equal(result.structuredContent.trip_deal.fuel_cost, 9.39);
+    assert.equal(result.structuredContent.trip_deal.cash_fuel_acquisition_cost, 209.39);
+    return 'Structured calculator result uses 28 MPG and $4/gallon defaults';
+  });
+  await check('conflicting search radii fail before authentication', async () => {
+    const result = await local.callTool({ name: 'search_listings', arguments: {
+      query: 'desk', latitude: 39, longitude: -77, radius_km: 50, radius_miles: 250,
+    } });
+    assert.equal(result.isError, true);
+    assert.match(content(result), /not both/);
+    return 'The tool rejects ambiguous units without contacting Facebook';
   });
   await check('create a monitor', async () => {
     const result = await local.callTool({ name: 'monitor_search', arguments: { name: 'validation-only', query: 'desk', latitude: 40.7128, longitude: -74.0060 } });

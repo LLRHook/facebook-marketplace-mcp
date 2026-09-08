@@ -38,9 +38,9 @@ function isListing(node: unknown): node is JsonObject {
     node.marketplace_listing_title.length > 0;
 }
 
-function hasNoResultsStory(root: unknown): boolean {
+function hasNoResultsStory(root: unknown, type = "EntMarketplaceSearchFeedNoResults"): boolean {
   for (const node of objects(root)) {
-    if (node.__typename === "EntMarketplaceSearchFeedNoResults") return true;
+    if (node.__typename === type) return true;
   }
   return false;
 }
@@ -73,6 +73,14 @@ function postedDate(value: unknown): string {
 
 function normalizeListing(node: JsonObject): MarketplaceListing {
   const price = node.listing_price;
+  const amount = typeof price?.amount === "number" ? price.amount :
+    typeof price?.amount === "string" && /^\d+(?:\.\d+)?$/.test(price.amount)
+      ? Number(price.amount) : null;
+  const latitude = node.location?.latitude;
+  const longitude = node.location?.longitude;
+  const hasCoordinates = typeof latitude === "number" && Number.isFinite(latitude) &&
+    Math.abs(latitude) <= 90 && typeof longitude === "number" && Number.isFinite(longitude) &&
+    Math.abs(longitude) <= 180;
   return {
     id: node.id,
     title: node.marketplace_listing_title,
@@ -88,6 +96,13 @@ function normalizeListing(node: JsonObject): MarketplaceListing {
     postedDate: postedDate(node.creation_time),
     url: `https://www.facebook.com/marketplace/item/${encodeURIComponent(node.id)}/`,
     isPending: node.is_pending === true,
+    isSold: node.is_sold === true,
+    priceAmount: amount !== null && Number.isFinite(amount) && amount >= 0 ? amount : null,
+    currency: text(price?.currency) || null,
+    latitude: hasCoordinates ? latitude : null,
+    longitude: hasCoordinates ? longitude : null,
+    deliveryTypes: Array.isArray(node.delivery_types)
+      ? node.delivery_types.filter((value: unknown) => typeof value === "string") : [],
   };
 }
 
@@ -101,7 +116,8 @@ export function parseSearchResponse(response: unknown): SearchResult {
     .filter(isListing)
     .map(normalizeListing) as MarketplaceListing[];
   if (connection.edges.length > 0 && listings.length === 0 &&
-      !hasNoResultsStory(connection)) {
+      !hasNoResultsStory(connection) && !(connection.page_info?.has_next_page === false &&
+        hasNoResultsStory(connection, "MarketplaceSearchFeedEndOfResults"))) {
     throw new Error("Marketplace search contained no recognizable listings.");
   }
   const pageInfo = connection.page_info;
@@ -195,6 +211,10 @@ function detailFromPayloads(payloads: unknown[], listingId: string): Marketplace
     : undefined;
   return {
     ...base,
+    // Detail fragments can contain the viewer's map center under location.
+    // Do not expose that as the seller's coordinates without verified provenance.
+    latitude: null,
+    longitude: null,
     description: text(merged.redacted_description?.text) ||
       text(merged.description?.text) || text(merged.description),
     images: [...images],

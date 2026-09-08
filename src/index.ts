@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { FacebookClient } from "./facebook/client.js";
 import { searchListingsSchema, createSearchHandler } from "./tools/search.js";
 import { getListingSchema, createListingHandler } from "./tools/listing.js";
+import { calculateTripDealSchema, createCalculateTripDealHandler } from "./tools/deal.js";
 import {
   searchLocationSchema,
   createLocationHandler,
@@ -87,5 +88,12 @@ server.tool(
 );
 
 // Start the server
+server.tool(
+  "calculate_trip_deal",
+  "Compare a supplied listing value with its purchase price and round-trip driving costs, optionally including time and resale fees",
+  calculateTripDealSchema,
+  createCalculateTripDealHandler()
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
