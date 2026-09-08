@@ -159,16 +159,27 @@ function mergeFragments(target: JsonObject, source: JsonObject): void {
 }
 
 function detailFromPayloads(payloads: unknown[], listingId: string): MarketplaceListingDetail {
+  const listingIds = new Set([listingId]);
+  // The public route may use product_item.id while Relay uses a separate listing ID.
+  // Discover that explicit link first so fragments preceding it are included too.
+  for (const payload of payloads) {
+    for (const node of objects(payload)) {
+      if (isObject(node.product_item) && node.product_item.id === listingId &&
+          typeof node.id === "string" && node.id.length > 0) {
+        listingIds.add(node.id);
+      }
+    }
+  }
   const merged: JsonObject = Object.create(null);
   for (const payload of payloads) {
     for (const node of objects(payload)) {
-      if (node.id === listingId) mergeFragments(merged, node);
+      if (listingIds.has(node.id)) mergeFragments(merged, node);
     }
   }
   if (!isListing(merged)) {
     throw new Error("The requested listing was not found in the page data. It may be unavailable, require login, or use a changed page format.");
   }
-  const base = normalizeListing(merged);
+  const base = normalizeListing({ ...merged, id: listingId });
   const images = new Set<string>();
   if (base.imageUrl) images.add(base.imageUrl);
   for (const photos of [merged.listing_photos, merged.marketplace_listing_photos]) {
@@ -179,6 +190,9 @@ function detailFromPayloads(payloads: unknown[], listingId: string): Marketplace
     }
   }
   const seller = merged.marketplace_listing_seller;
+  const conditionAttribute = Array.isArray(merged.attribute_data)
+    ? merged.attribute_data.find((entry: unknown) => isObject(entry) && entry.attribute_name === "Condition")
+    : undefined;
   return {
     ...base,
     description: text(merged.redacted_description?.text) ||
@@ -186,7 +200,7 @@ function detailFromPayloads(payloads: unknown[], listingId: string): Marketplace
     images: [...images],
     imageUrl: base.imageUrl || [...images][0] || "",
     condition: text(merged.condition_text?.text) ||
-      text(merged.condition_text) || text(merged.condition),
+      text(merged.condition_text) || text(merged.condition) || text(conditionAttribute?.label),
     seller: {
       name: text(seller?.name),
       profileUrl: text(seller?.id)

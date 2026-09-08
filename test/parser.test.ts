@@ -116,3 +116,50 @@ test("GraphQL listing details use the same target-specific normalization", () =>
   assert.equal(parseListingDetailResponse({ data: { node: listing } }, "123").title, "Desk");
   assert.throws(() => parseListingDetailResponse({ data: { node: listing } }, "456"));
 });
+
+test("listing details resolve public product IDs and merge earlier internal-ID fragments", () => {
+  const target = (node: unknown) => ({ viewer: { marketplace_product_details_page: { target: node } } });
+  const html = page({ related: {
+    id: "other-internal", product_item: { id: "other-public" },
+    marketplace_listing_title: "Unrelated chair", listing_price: { amount: "999" },
+    marketplace_listing_seller: { name: "Unrelated seller" },
+  } }) + page([[target({
+    id: "fixture-internal",
+    listing_photos: [{ image: { uri: "https://example.com/fixture-desk.jpg" } }],
+    marketplace_listing_seller: { id: "fixture-seller", name: "Fixture seller" },
+  })]]) + page(target({
+    id: "fixture-internal", product_item: { id: "fixture-public" },
+    __typename: "GroupCommerceProductItem",
+    marketplace_listing_title: "Fixture desk",
+    listing_price: { formatted_amount_zeros_stripped: "$42" },
+    redacted_description: { text: "A synthetic desk description." },
+    attribute_data: [{ attribute_name: "Condition", label: "Used - good" }],
+  }));
+
+  const detail = parseListingDetailFromPage(html, "fixture-public");
+  assert.equal(detail.id, "fixture-public");
+  assert.equal(detail.url, "https://www.facebook.com/marketplace/item/fixture-public/");
+  assert.equal(detail.title, "Fixture desk");
+  assert.equal(detail.price, "$42");
+  assert.equal(detail.description, "A synthetic desk description.");
+  assert.equal(detail.seller.name, "Fixture seller");
+  assert.deepEqual(detail.images, ["https://example.com/fixture-desk.jpg"]);
+  assert.equal(detail.condition, "Used - good");
+  assert.throws(() => parseListingDetailFromPage(html, "missing-public"), /requested listing was not found/);
+});
+
+test("a product-ID link cannot pull fields from unrelated internal IDs", () => {
+  const response = { data: [
+    { id: "other-internal", product_item: { id: "other-public" },
+      marketplace_listing_title: "Wrong title", listing_price: { amount: "999" } },
+    { id: "fixture-internal", product_item: { id: "fixture-public" },
+      marketplace_listing_title: "Fixture title", condition_text: "New",
+      attribute_data: [{ attribute_name: "Condition", label: "Used" }] },
+  ] };
+  const detail = parseListingDetailResponse(response, "fixture-public");
+  assert.equal(detail.id, "fixture-public");
+  assert.equal(detail.title, "Fixture title");
+  assert.equal(detail.price, "N/A");
+  assert.equal(detail.condition, "New");
+  assert.throws(() => parseListingDetailResponse(response, "missing-public"), /requested listing was not found/);
+});

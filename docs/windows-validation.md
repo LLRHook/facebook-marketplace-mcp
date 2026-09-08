@@ -9,7 +9,7 @@ The Windows implementation passed these local checks:
 | Check | Result |
 | --- | --- |
 | `npm ci --omit=optional --no-audit --no-fund` | Clean install without native SQLite |
-| `npm test` | Build, 34 source tests, 5 response regressions, 9 MCP subprocess checks passed |
+| `npm test` | Build, 36 source tests, 5 response regressions, 9 MCP subprocess checks passed |
 | `npm run test:browser` | Real Windows browser launched; profile with spaces persisted fixture cookies across restart; saved session loaded |
 | Capture script TypeScript check | Passed with strict checking and no emit |
 | `git diff --check` | Passed |
@@ -19,7 +19,15 @@ The MCP checks cover discovery of all seven tools, monitor creation, duplicate r
 
 The browser check uses fixture cookies in a separate temporary profile and a local data URL. It makes no Facebook requests. The login CLI also opened the real dedicated Chrome profile for interactive authentication.
 
-An authenticated live Marketplace search has not been verified. After completing `npm run login`, use `npm run test:live` to exercise a search, a returned listing's details, and a location lookup. Query IDs and shapes come from the August 28 community capture in [upstream PR #3](https://github.com/jdcodes1/facebook-marketplace-mcp/pull/3); they may require recapture if Facebook changes its protocol.
+Authenticated live validation passed on September 8, 2026 after `npm run login` saved a Windows browser session. `npm run test:live` exercised the actual MCP server and confirmed:
+
+- A desk search around New York City returned listing links.
+- A returned listing's detail title, price, and public URL matched its search result, with images or description present.
+- A location lookup returned coordinates near New York City.
+
+The first live listing-detail request exposed separate public product IDs and internal listing IDs. The parser now follows the explicit `product_item.id` relationship and combines only associated fragments. A replay of the originally failing page recovered the matching title and price, four photos, a description, seller, and condition. Two synthetic regression tests cover this mapping without storing real account or listing data in the test suite.
+
+The login browser closes automatically after saving the session; this is successful completion, not a crash. The live test writes a local, ignored `validation/live-results.json` containing check outcomes and counts. These checks establish the three core read operations with one account at that time; they do not verify every filter or Marketplace category. Query IDs and shapes come from the August 28 community capture in [upstream PR #3](https://github.com/jdcodes1/facebook-marketplace-mcp/pull/3); they may require recapture if Facebook changes its protocol. The public/internal listing-ID mapping is also covered by [upstream PR #4](https://github.com/jdcodes1/facebook-marketplace-mcp/pull/4).
 
 The GitHub Actions workflow runs the offline build and tests on Windows, macOS and Linux with Node 22 and 24. It omits the optional SQLite dependency. The legacy macOS Keychain fallback still requires that dependency and has not been exercised locally on this Windows machine.
 

@@ -144,7 +144,7 @@ npm run test:browser
 
 `npm test` builds the server, runs synthetic response and session regressions, and exercises the actual MCP subprocess with isolated monitor storage. It makes no Facebook requests and works without the optional SQLite module. `test:browser` checks a real installed browser, persistent profile, and session round-trip with fixture cookies in temporary storage; it also makes no Facebook requests.
 
-After logging in, run `npm run test:live` to search for desks around New York City, fetch a returned listing, and look up the city coordinates. This is a read-only check and respects the server's rate limiter. It requires a valid session and available Marketplace listings. No automated test sends messages or creates listings.
+After logging in, run `npm run test:live` to search for desks around New York City, verify a returned listing's title, price and public URL against its details, and look up the city coordinates. This is a read-only check and respects the server's rate limiter. It requires a valid session and available Marketplace listings. No automated test sends messages or creates listings. The three live operations passed on Windows on September 8, 2026; see [validation evidence](docs/windows-validation.md) for scope and limitations.
 
 ## Rate Limiting
 
