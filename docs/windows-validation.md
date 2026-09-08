@@ -9,7 +9,7 @@ The Windows implementation passed these local checks:
 | Check | Result |
 | --- | --- |
 | `npm ci --omit=optional --no-audit --no-fund` | Clean install without native SQLite |
-| `npm test` | Build, 33 source tests, 5 response regressions, 9 MCP subprocess checks passed |
+| `npm test` | Build, 34 source tests, 5 response regressions, 9 MCP subprocess checks passed |
 | `npm run test:browser` | Real Windows browser launched; profile with spaces persisted fixture cookies across restart; saved session loaded |
 | Capture script TypeScript check | Passed with strict checking and no emit |
 | `git diff --check` | Passed |
@@ -22,3 +22,5 @@ The browser check uses fixture cookies in a separate temporary profile and a loc
 An authenticated live Marketplace search has not been verified. After completing `npm run login`, use `npm run test:live` to exercise a search, a returned listing's details, and a location lookup. Query IDs and shapes come from the August 28 community capture in [upstream PR #3](https://github.com/jdcodes1/facebook-marketplace-mcp/pull/3); they may require recapture if Facebook changes its protocol.
 
 The GitHub Actions workflow runs the offline build and tests on Windows, macOS and Linux with Node 22 and 24. It omits the optional SQLite dependency. The legacy macOS Keychain fallback still requires that dependency and has not been exercised locally on this Windows machine.
+
+The first cloud run found a macOS CLI failure through a symlinked temporary directory. A Windows directory-junction test reproduced the same silent exit. Entry point detection now resolves the real file path as well as its URL encoding; the regression runs on every CI platform.

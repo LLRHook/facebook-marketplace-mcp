@@ -1,11 +1,17 @@
 import path from "node:path";
+import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import type { BrowserContext } from "playwright";
 import { launchFacebookBrowser } from "./browser.js";
 import { getSessionFile, saveFacebookSession, validateSession } from "./session.js";
 
 export function isMainModule(url: string, entry = process.argv[1]): boolean {
-  return !!entry && url === pathToFileURL(path.resolve(entry)).href;
+  if (!entry) return false;
+  const resolved = path.resolve(entry);
+  if (url === pathToFileURL(resolved).href) return true;
+  // Node resolves imported modules through symlinks (including macOS /var -> /private/var).
+  try { return url === pathToFileURL(fs.realpathSync(resolved)).href; }
+  catch { return false; }
 }
 
 export async function runFacebookLogin(options: {

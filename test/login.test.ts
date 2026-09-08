@@ -27,6 +27,15 @@ test("the real compiled CLI prints help from a path containing spaces and a hash
   assert.match(result, /FACEBOOK_SESSION_FILE/);
 });
 
+test("the real CLI starts through a symlinked project path", t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "fb-login-symlink-"));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const linked = path.join(temp, "linked project");
+  fs.symlinkSync(path.resolve("."), linked, process.platform === "win32" ? "junction" : "dir");
+  const result = execFileSync(process.execPath, [path.join(linked, "dist/facebook/login.js"), "--help"], { encoding: "utf8", cwd: os.tmpdir() });
+  assert.match(result, /Usage: npm run login/);
+});
+
 test("login respects FACEBOOK_SESSION_FILE, filters unrelated cookies, and closes its browser", async t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "fb-login-test-"));
   const file = path.join(temp, "custom path", "session.json");
