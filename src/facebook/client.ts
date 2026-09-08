@@ -4,11 +4,8 @@ import type {
   SearchResult,
   MarketplaceListingDetail,
 } from "./types.js";
-import {
-  extractChromeCookies,
-  cookiesToHeader,
-  getCookieValue,
-} from "./auth.js";
+import { cookiesToHeader, getCookieValue } from "./auth.js";
+import { loadFacebookAuth } from "./session.js";
 import {
   MARKETPLACE_SEARCH_DOC_ID,
   LOCATION_SEARCH_DOC_ID,
@@ -16,42 +13,52 @@ import {
   buildSearchVariables,
   buildLocationSearchVariables,
 } from "./queries.js";
-import { parseSearchResponse, parseListingDetailFromPage } from "./parser.js";
+import {
+  parseSearchResponse,
+  parseListingDetailFromPage,
+  parseListingDetailResponse,
+  parseLocationResponse,
+} from "./parser.js";
 import { RateLimiter } from "../utils/rate-limit.js";
 
 const GRAPHQL_URL = "https://www.facebook.com/api/graphql/";
 const MARKETPLACE_URL = "https://www.facebook.com/marketplace/";
-
-const USER_AGENT =
+// Legacy macOS cookie extraction has no browser UA. Saved sessions supply their own.
+const LEGACY_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
-
 const BROWSER_HEADERS: Record<string, string> = {
-  "User-Agent": USER_AGENT,
   "Accept-Language": "en-US,en;q=0.9",
-  "sec-ch-ua": '"Chromium";v="146", "Google Chrome";v="146", "Not?A_Brand";v="99"',
-  "sec-ch-ua-mobile": "?0",
-  "sec-ch-ua-platform": '"macOS"',
   "sec-fetch-dest": "document",
   "sec-fetch-mode": "navigate",
   "sec-fetch-site": "none",
-  "sec-fetch-user": "?1",
   "Upgrade-Insecure-Requests": "1",
 };
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 export class FacebookClient {
   private session: FacebookSession | null = null;
   private rateLimiter: RateLimiter;
   private reqCounter = 0;
   private chromeProfile: string;
+  private userAgent = LEGACY_USER_AGENT;
+  private requestTimeoutMs: number;
 
   constructor(
     options: {
       maxRequestsPerMinute?: number;
       chromeProfile?: string;
+      requestTimeoutMs?: number;
     } = {}
   ) {
     this.rateLimiter = new RateLimiter(options.maxRequestsPerMinute ?? 3);
     this.chromeProfile = options.chromeProfile ?? "Default";
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    if (!Number.isInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+      throw new Error("Request timeout must be a positive integer.");
+    }
   }
 
   async ensureSession(): Promise<FacebookSession> {
@@ -60,34 +67,37 @@ export class FacebookClient {
   }
 
   async initSession(): Promise<FacebookSession> {
-    const cookies = extractChromeCookies("facebook.com", this.chromeProfile);
-
+    const { cookies, userAgent } = await loadFacebookAuth({
+      chromeProfile: this.chromeProfile,
+    });
+    this.userAgent = userAgent ?? LEGACY_USER_AGENT;
     if (cookies.length === 0) {
-      throw new Error(
-        "No Facebook cookies found in Chrome. Make sure you're logged into Facebook in Chrome."
-      );
+      throw new Error("No Facebook session cookies found. Run npm run login.");
     }
-
     const userId = getCookieValue(cookies, "c_user");
     if (!userId) {
-      throw new Error(
-        "No c_user cookie found. Make sure you're logged into Facebook in Chrome."
-      );
+      throw new Error("No active Facebook user cookie found. Run npm run login.");
     }
-
     const cookieHeader = cookiesToHeader(cookies);
-
-    // Fetch marketplace page to extract tokens
     const tokens = await this.extractTokens(cookieHeader);
-
-    this.session = {
-      cookies,
-      cookieHeader,
-      userId,
-      ...tokens,
-    };
-
+    this.session = { cookies, cookieHeader, userId, ...tokens };
     return this.session;
+  }
+
+  private async fetchFacebook(
+    url: string,
+    options: RequestInit,
+  ): Promise<{ response: Response; text: string }> {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+      // Keep the deadline active while receiving the response body too.
+      return { response, text: await response.text() };
+    } catch {
+      throw new Error("Facebook request failed or timed out. Try again later.");
+    }
   }
 
   private async extractTokens(cookieHeader: string): Promise<{
@@ -97,53 +107,36 @@ export class FacebookClient {
     clientRevision: string;
   }> {
     await this.rateLimiter.wait();
-
-    const res = await fetch(MARKETPLACE_URL, {
+    const { response: res, text: html } = await this.fetchFacebook(MARKETPLACE_URL, {
       headers: {
         ...BROWSER_HEADERS,
+        "User-Agent": this.userAgent,
         Cookie: cookieHeader,
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
       redirect: "follow",
     });
-
     if (!res.ok) {
-      throw new Error(
-        `Failed to fetch marketplace page: ${res.status} ${res.statusText}`
-      );
+      throw new Error(`Failed to fetch Marketplace page (HTTP ${res.status}).`);
     }
-
-    const html = await res.text();
-
-    // Extract fb_dtsg from DTSGInitData or DTSGInitialData
     const dtsgMatch =
       html.match(/"DTSGInitData"\s*,\s*\[\]\s*,\s*\{"token"\s*:\s*"([^"]+)"/) ??
       html.match(/"DTSGInitialData"\s*,\s*\[\]\s*,\s*\{"token"\s*:\s*"([^"]+)"/) ??
       html.match(/"dtsg"\s*:\s*\{"token"\s*:\s*"([^"]+)"/);
-
     if (!dtsgMatch) {
-      throw new Error(
-        "Failed to extract fb_dtsg token. Session may be expired — try logging into Facebook in Chrome again."
-      );
+      throw new Error("Could not initialize Marketplace. The session may be expired or access blocked; run npm run login.");
     }
-    const fbDtsg = dtsgMatch[1];
-
-    // Extract jazoest
     const jazoestMatch = html.match(/jazoest=(\d+)/);
-    const jazoest = jazoestMatch ? jazoestMatch[1] : "";
-
-    // Extract lsd
     const lsdMatch = html.match(/"LSD"\s*,\s*\[\]\s*,\s*\{"token"\s*:\s*"([^"]+)"/) ??
       html.match(/name="lsd"\s+value="([^"]+)"/);
-    const lsd = lsdMatch ? lsdMatch[1] : "";
-
-    // Extract client revision
     const revMatch = html.match(/"client_revision"\s*:\s*(\d+)/) ??
       html.match(/__spin_r:\s*(\d+)/);
-    const clientRevision = revMatch ? revMatch[1] : "1";
-
-    return { fbDtsg, lsd, jazoest, clientRevision };
+    return {
+      fbDtsg: dtsgMatch[1],
+      lsd: lsdMatch?.[1] ?? "",
+      jazoest: jazoestMatch?.[1] ?? "",
+      clientRevision: revMatch?.[1] ?? "1",
+    };
   }
 
   private async graphqlRequest(
@@ -152,9 +145,7 @@ export class FacebookClient {
   ): Promise<unknown> {
     const session = await this.ensureSession();
     await this.rateLimiter.wait();
-
     this.reqCounter++;
-
     const body = new URLSearchParams({
       fb_dtsg: session.fbDtsg,
       lsd: session.lsd,
@@ -165,11 +156,11 @@ export class FacebookClient {
       __req: this.reqCounter.toString(36),
       __rev: session.clientRevision,
     });
-
-    const res = await fetch(GRAPHQL_URL, {
+    const { response: res, text } = await this.fetchFacebook(GRAPHQL_URL, {
       method: "POST",
       headers: {
         ...BROWSER_HEADERS,
+        "User-Agent": this.userAgent,
         Cookie: session.cookieHeader,
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "*/*",
@@ -177,92 +168,72 @@ export class FacebookClient {
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
         Origin: "https://www.facebook.com",
-        Referer: "https://www.facebook.com/marketplace/",
+        Referer: MARKETPLACE_URL,
         "X-FB-LSD": session.lsd,
       },
       body: body.toString(),
     });
-
     if (res.status === 401 || res.status === 403) {
-      // Session expired — clear and retry once
       this.session = null;
-      throw new Error("Session expired. Re-initializing on next request.");
+      throw new Error("Session expired or access blocked. Run npm run login.");
     }
-
     if (!res.ok) {
-      throw new Error(`GraphQL request failed: ${res.status} ${res.statusText}`);
+      throw new Error(`GraphQL request failed (HTTP ${res.status}).`);
     }
-
-    let text = await res.text();
-
-    // Strip Facebook's anti-JSONP prefix
-    const jsonStart = text.indexOf("{");
-    if (jsonStart > 0) {
-      text = text.slice(jsonStart);
-    }
-
+    let data: unknown;
     try {
-      return JSON.parse(text);
+      // Only remove Facebook's known prefix, never arbitrary HTML before a brace.
+      data = JSON.parse(text.replace(/^\s*for\s*\(;;\);\s*/, ""));
     } catch {
-      throw new Error(`Failed to parse GraphQL response: ${text.slice(0, 200)}`);
+      throw new Error("Facebook returned an invalid GraphQL response. Its query format may have changed.");
     }
+    if (!isObject(data)) {
+      throw new Error("Facebook returned an invalid GraphQL response envelope.");
+    }
+    const hasErrors = Array.isArray(data.errors) ? data.errors.length > 0 : Boolean(data.errors);
+    if (hasErrors || data.error) {
+      this.session = null;
+      throw new Error("Facebook returned GraphQL errors. The session or query IDs may need refreshing.");
+    }
+    if (!isObject(data.data)) {
+      throw new Error("Facebook returned GraphQL data in an unrecognized format.");
+    }
+    return data;
   }
 
   async searchListings(params: SearchParams): Promise<SearchResult> {
-    const variables = buildSearchVariables(params);
-    const data = await this.graphqlRequest(MARKETPLACE_SEARCH_DOC_ID, variables);
+    const data = await this.graphqlRequest(MARKETPLACE_SEARCH_DOC_ID, buildSearchVariables(params));
     return parseSearchResponse(data);
   }
 
   async getListingDetail(listingId: string): Promise<MarketplaceListingDetail> {
-    // If we have a doc_id for listing detail, use GraphQL
     if (LISTING_DETAIL_DOC_ID) {
-      const data = await this.graphqlRequest(LISTING_DETAIL_DOC_ID, {
-        targetId: listingId,
-      });
-      // Parse response (would need a dedicated parser)
-      return data as MarketplaceListingDetail;
+      const data = await this.graphqlRequest(LISTING_DETAIL_DOC_ID, { targetId: listingId });
+      return parseListingDetailResponse(data, listingId);
     }
-
-    // Fallback: fetch the listing page directly and parse embedded data
     const session = await this.ensureSession();
     await this.rateLimiter.wait();
-
-    const url = `https://www.facebook.com/marketplace/item/${listingId}/`;
-    const res = await fetch(url, {
+    const url = `https://www.facebook.com/marketplace/item/${encodeURIComponent(listingId)}/`;
+    const { response: res, text: html } = await this.fetchFacebook(url, {
       headers: {
         ...BROWSER_HEADERS,
+        "User-Agent": this.userAgent,
         Cookie: session.cookieHeader,
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
       redirect: "follow",
     });
-
     if (!res.ok) {
-      throw new Error(`Failed to fetch listing ${listingId}: ${res.status}`);
+      throw new Error(`Failed to fetch listing (HTTP ${res.status}).`);
     }
-
-    const html = await res.text();
     return parseListingDetailFromPage(html, listingId);
   }
 
   async searchLocation(
     query: string
   ): Promise<Array<{ name: string; latitude: number; longitude: number }>> {
-    const variables = buildLocationSearchVariables(query);
-    const data = await this.graphqlRequest(LOCATION_SEARCH_DOC_ID, variables);
-
-    try {
-      const results = (data as any)?.data?.city_street_search?.street_results?.edges ?? [];
-      return results.map((edge: any) => ({
-        name: edge.node?.single_line_address ?? edge.node?.subtitle ?? "Unknown",
-        latitude: edge.node?.location?.latitude ?? 0,
-        longitude: edge.node?.location?.longitude ?? 0,
-      }));
-    } catch {
-      return [];
-    }
+    const data = await this.graphqlRequest(LOCATION_SEARCH_DOC_ID, buildLocationSearchVariables(query));
+    return parseLocationResponse(data);
   }
 
   clearSession() {

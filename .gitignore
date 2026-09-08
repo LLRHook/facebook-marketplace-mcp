@@ -4,3 +4,9 @@ dist/
 .env.local
 *.db
 /tmp/
+.local/
+captured-queries.json
+*session*.json
+*session*.json.*.tmp
+browser-profile/
+validation/*-results.json

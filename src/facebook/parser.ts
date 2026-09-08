@@ -4,146 +4,216 @@ import type {
   SearchResult,
 } from "./types.js";
 
-export function parseSearchResponse(data: unknown): SearchResult {
-  try {
-    const root = data as any;
-    const feedUnits =
-      root?.data?.marketplace_search?.feed_units ??
-      root?.data?.marketplace_search?.feed_units;
+type JsonObject = Record<string, any>;
 
-    if (!feedUnits) {
-      return { listings: [], hasNextPage: false, endCursor: null };
-    }
+function isObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
-    const edges = feedUnits.edges ?? [];
-    const pageInfo = feedUnits.page_info ?? {};
+function text(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
 
-    const listings: MarketplaceListing[] = edges
-      .map((edge: any) => {
-        const listing = edge?.node?.listing;
-        if (!listing) return null;
-
-        return {
-          id: listing.id ?? "",
-          title: listing.marketplace_listing_title ?? "",
-          price:
-            listing.listing_price?.formatted_amount ??
-            listing.listing_price?.amount ??
-            "N/A",
-          location:
-            listing.location?.reverse_geocode?.city_page?.display_name ??
-            listing.location?.reverse_geocode?.city ??
-            "Unknown",
-          imageUrl: listing.primary_listing_photo?.image?.uri ?? "",
-          sellerName: listing.marketplace_listing_seller?.name ?? "Unknown",
-          postedDate: listing.creation_time
-            ? new Date(listing.creation_time * 1000).toISOString()
-            : "",
-          url: `https://www.facebook.com/marketplace/item/${listing.id}/`,
-          isPending: listing.is_pending ?? false,
-        };
-      })
-      .filter(Boolean) as MarketplaceListing[];
-
-    return {
-      listings,
-      hasNextPage: pageInfo.has_next_page ?? false,
-      endCursor: pageInfo.end_cursor ?? null,
-    };
-  } catch {
-    return { listings: [], hasNextPage: false, endCursor: null };
+// Walk parsed JSON only. No script execution or evaluation of page content.
+function* objects(root: unknown): Generator<JsonObject> {
+  const queue = [root];
+  const seen = new Set<unknown>();
+  for (let index = 0; index < queue.length; index++) {
+    const current = queue[index];
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (isObject(current)) yield current;
+    for (const value of Object.values(current)) queue.push(value);
   }
+}
+
+function listingFromEdge(edge: unknown): JsonObject | undefined {
+  if (!isObject(edge) || !isObject(edge.node)) return undefined;
+  return isObject(edge.node.listing) ? edge.node.listing : edge.node;
+}
+
+function isListing(node: unknown): node is JsonObject {
+  return isObject(node) && typeof node.id === "string" && node.id.length > 0 &&
+    typeof node.marketplace_listing_title === "string" &&
+    node.marketplace_listing_title.length > 0;
+}
+
+function hasNoResultsStory(root: unknown): boolean {
+  for (const node of objects(root)) {
+    if (node.__typename === "EntMarketplaceSearchFeedNoResults") return true;
+  }
+  return false;
+}
+
+function findListingConnection(root: JsonObject): JsonObject {
+  // Keep known empty connections distinct from an unknown response shape.
+  const known = root.marketplace_search?.feed_units ??
+    root.viewer?.marketplace_feed_stories;
+  if (known !== undefined) {
+    if (!isObject(known) || !Array.isArray(known.edges)) {
+      throw new Error("Marketplace returned a malformed listing connection.");
+    }
+    return known;
+  }
+  for (const node of objects(root)) {
+    if (Array.isArray(node.edges) &&
+        node.edges.some((edge: unknown) => isListing(listingFromEdge(edge)))) {
+      return node;
+    }
+  }
+  if (hasNoResultsStory(root)) return { edges: [] };
+  throw new Error("Marketplace search response has an unrecognized format.");
+}
+
+function postedDate(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  const date = new Date(value * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+}
+
+function normalizeListing(node: JsonObject): MarketplaceListing {
+  const price = node.listing_price;
+  return {
+    id: node.id,
+    title: node.marketplace_listing_title,
+    price: text(price?.formatted_amount_zeros_stripped) ||
+      text(price?.formatted_amount) ||
+      (typeof price?.amount === "number" || typeof price?.amount === "string"
+        ? String(price.amount) : "N/A"),
+    location: text(node.location_text?.text) ||
+      text(node.location?.reverse_geocode?.city_page?.display_name) ||
+      text(node.location?.reverse_geocode?.city, "Unknown"),
+    imageUrl: text(node.primary_listing_photo?.image?.uri),
+    sellerName: text(node.marketplace_listing_seller?.name, "Unknown"),
+    postedDate: postedDate(node.creation_time),
+    url: `https://www.facebook.com/marketplace/item/${encodeURIComponent(node.id)}/`,
+    isPending: node.is_pending === true,
+  };
+}
+
+export function parseSearchResponse(response: unknown): SearchResult {
+  if (!isObject(response) || !isObject(response.data)) {
+    throw new Error("Marketplace search response is missing data.");
+  }
+  const connection = findListingConnection(response.data);
+  const listings = connection.edges
+    .map(listingFromEdge)
+    .filter(isListing)
+    .map(normalizeListing) as MarketplaceListing[];
+  if (connection.edges.length > 0 && listings.length === 0 &&
+      !hasNoResultsStory(connection)) {
+    throw new Error("Marketplace search contained no recognizable listings.");
+  }
+  const pageInfo = connection.page_info;
+  if (pageInfo != null && (!isObject(pageInfo) ||
+      (pageInfo.has_next_page != null && typeof pageInfo.has_next_page !== "boolean") ||
+      (pageInfo.end_cursor != null && typeof pageInfo.end_cursor !== "string"))) {
+    throw new Error("Marketplace returned malformed pagination data.");
+  }
+  return {
+    listings,
+    hasNextPage: pageInfo?.has_next_page ?? false,
+    endCursor: pageInfo?.end_cursor ?? null,
+  };
+}
+
+export function parseLocationResponse(response: unknown):
+  Array<{ name: string; latitude: number; longitude: number }> {
+  const connection = isObject(response)
+    ? response.data?.city_street_search?.street_results : undefined;
+  if (!isObject(connection) || !Array.isArray(connection.edges)) {
+    throw new Error("Marketplace location response has an unrecognized format.");
+  }
+  const results = connection.edges.flatMap((edge: unknown) => {
+    const node = isObject(edge) ? edge.node : undefined;
+    if (!isObject(node)) return [];
+    const name = text(node.single_line_address) || text(node.subtitle);
+    const latitude = node.location?.latitude;
+    const longitude = node.location?.longitude;
+    if (!name || typeof latitude !== "number" || !Number.isFinite(latitude) ||
+        Math.abs(latitude) > 90 || typeof longitude !== "number" ||
+        !Number.isFinite(longitude) || Math.abs(longitude) > 180) return [];
+    return [{ name, latitude, longitude }];
+  });
+  if (connection.edges.length > 0 && results.length === 0) {
+    throw new Error("Marketplace location response contained no valid coordinates.");
+  }
+  return results;
+}
+
+// Relay fragments for the requested ID fill gaps; other listings never act as fallbacks.
+function mergeFragments(target: JsonObject, source: JsonObject): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype" ||
+        value === null || value === undefined) continue;
+    if (isObject(value)) {
+      if (!isObject(target[key])) target[key] = Object.create(null);
+      mergeFragments(target[key], value);
+    } else if (Array.isArray(value)) {
+      const existing = Array.isArray(target[key]) ? target[key] : [];
+      target[key] = [...existing, ...value];
+    } else if (target[key] == null || target[key] === "") {
+      target[key] = value;
+    }
+  }
+}
+
+function detailFromPayloads(payloads: unknown[], listingId: string): MarketplaceListingDetail {
+  const merged: JsonObject = Object.create(null);
+  for (const payload of payloads) {
+    for (const node of objects(payload)) {
+      if (node.id === listingId) mergeFragments(merged, node);
+    }
+  }
+  if (!isListing(merged)) {
+    throw new Error("The requested listing was not found in the page data. It may be unavailable, require login, or use a changed page format.");
+  }
+  const base = normalizeListing(merged);
+  const images = new Set<string>();
+  if (base.imageUrl) images.add(base.imageUrl);
+  for (const photos of [merged.listing_photos, merged.marketplace_listing_photos]) {
+    if (!photos || typeof photos !== "object") continue;
+    for (const photo of objects(photos)) {
+      const uri = text(photo.image?.uri);
+      if (uri) images.add(uri);
+    }
+  }
+  const seller = merged.marketplace_listing_seller;
+  return {
+    ...base,
+    description: text(merged.redacted_description?.text) ||
+      text(merged.description?.text) || text(merged.description),
+    images: [...images],
+    imageUrl: base.imageUrl || [...images][0] || "",
+    condition: text(merged.condition_text?.text) ||
+      text(merged.condition_text) || text(merged.condition),
+    seller: {
+      name: text(seller?.name),
+      profileUrl: text(seller?.id)
+        ? `https://www.facebook.com/${encodeURIComponent(seller.id)}` : "",
+    },
+  };
+}
+
+export function parseListingDetailResponse(
+  response: unknown,
+  listingId: string,
+): MarketplaceListingDetail {
+  return detailFromPayloads([response], listingId);
 }
 
 export function parseListingDetailFromPage(
   html: string,
-  listingId: string
+  listingId: string,
 ): MarketplaceListingDetail {
-  // Facebook embeds listing data as JSON in script tags.
-  // Look for structured data or relay-style data payloads.
-
-  const detail: MarketplaceListingDetail = {
-    id: listingId,
-    title: "",
-    description: "",
-    price: "",
-    location: "",
-    imageUrl: "",
-    images: [],
-    sellerName: "",
-    postedDate: "",
-    url: `https://www.facebook.com/marketplace/item/${listingId}/`,
-    isPending: false,
-    condition: "",
-    seller: { name: "", profileUrl: "" },
-  };
-
-  // Try to extract from meta tags first (most reliable)
-  const titleMatch = html.match(
-    /<meta\s+property="og:title"\s+content="([^"]*)"/
-  );
-  if (titleMatch) detail.title = decodeHtmlEntities(titleMatch[1]);
-
-  const descMatch = html.match(
-    /<meta\s+property="og:description"\s+content="([^"]*)"/
-  );
-  if (descMatch) detail.description = decodeHtmlEntities(descMatch[1]);
-
-  const imageMatch = html.match(
-    /<meta\s+property="og:image"\s+content="([^"]*)"/
-  );
-  if (imageMatch) {
-    detail.imageUrl = decodeHtmlEntities(imageMatch[1]);
-    detail.images.push(detail.imageUrl);
-  }
-
-  // Try to extract price from embedded JSON
-  const priceMatch =
-    html.match(/"formatted_amount"\s*:\s*"([^"]+)"/) ??
-    html.match(/"price"\s*:\s*"([^"]+)"/) ??
-    html.match(/\"amount\"\s*:\s*"([^"]+)"/);
-  if (priceMatch) detail.price = priceMatch[1];
-
-  // Extract additional images
-  const imageRegex = /marketplace_listing_photos.*?"uri"\s*:\s*"([^"]+)"/g;
-  let imgMatch;
-  while ((imgMatch = imageRegex.exec(html)) !== null) {
-    const url = imgMatch[1].replace(/\\\//g, "/");
-    if (!detail.images.includes(url)) {
-      detail.images.push(url);
+  const payloads: unknown[] = [];
+  for (const block of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
+    if (!/\btype\s*=\s*["']application\/json["']/i.test(block[1])) continue;
+    try {
+      payloads.push(JSON.parse(block[2]));
+    } catch {
+      // Ignore unrelated malformed script blocks; require valid target data below.
     }
   }
-
-  // Extract seller name
-  const sellerMatch = html.match(
-    /"marketplace_listing_seller"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"/
-  );
-  if (sellerMatch) {
-    detail.sellerName = sellerMatch[1];
-    detail.seller.name = sellerMatch[1];
-  }
-
-  // Extract condition
-  const conditionMatch = html.match(
-    /"condition_text"\s*:\s*"([^"]+)"/
-  ) ?? html.match(/"condition"\s*:\s*"([^"]+)"/);
-  if (conditionMatch) detail.condition = conditionMatch[1];
-
-  // Extract location
-  const locationMatch = html.match(
-    /"location_text"\s*:\s*\{[^}]*"text"\s*:\s*"([^"]+)"/
-  ) ?? html.match(/"reverse_geocode_city"\s*:\s*"([^"]+)"/);
-  if (locationMatch) detail.location = locationMatch[1];
-
-  return detail;
-}
-
-function decodeHtmlEntities(str: string): string {
-  return str
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;/g, "'")
-    .replace(/&#39;/g, "'");
+  return detailFromPayloads(payloads, listingId);
 }

@@ -1,27 +1,33 @@
 # Facebook Marketplace MCP Server — Context
 
 ## Architecture
-Direct GraphQL API replay (no browser at runtime). Speaks Facebook's internal `/api/graphql/` protocol using session cookies extracted from Chrome on macOS.
+Direct GraphQL API replay (no browser during searches). Windows, Linux and macOS can use a saved session created by `npm run login` in a dedicated Playwright browser profile. The original Chrome/Keychain extraction remains a macOS-only fallback. Session and profile defaults live under the user home, independent of process working directory.
 
 ## Key Files
 - `src/index.ts` — MCP server entry point (stdio transport)
 - `src/facebook/client.ts` — GraphQL HTTP client, session management, token extraction
 - `src/facebook/auth.ts` — Chrome cookie extraction (SQLite + Keychain decrypt)
+- `src/facebook/session.ts` — validated saved sessions, paths, and macOS fallback selection
+- `src/facebook/login.ts` — interactive login CLI with Windows-safe entry point detection
+- `src/facebook/browser.ts` — dedicated profile launcher for Chrome, Edge or Chromium
+- `src/facebook/capture.ts` — query capture filtering and credential-field redaction
 - `src/facebook/queries.ts` — Known `doc_id` values for Marketplace GraphQL operations
 - `src/facebook/parser.ts` — Response normalization for search results and listing details
 - `src/tools/` — MCP tool handlers (search, listing, monitor)
 - `src/storage/monitors.ts` — JSON file persistence for saved search monitors (~/.fb-marketplace/)
 - `scripts/capture-queries.ts` — Playwright-based script to discover new GraphQL doc_ids
+- `test/` and `validation/` — auth/response regressions, MCP subprocess, optional browser and live checks
 
 ## Fragility Points
 - `doc_id` values change when Facebook deploys (use capture-queries script to update)
-- `fb_dtsg` token rotates per session (auto-refreshed on auth errors)
+- `fb_dtsg` token rotates per session (cached state is cleared on GraphQL/auth errors; login may need repeating)
 - Facebook DOM structure changes affect listing detail parsing
 - Rate limiting: 3 req/min default to avoid detection
 
 ## Dependencies
 - `@modelcontextprotocol/sdk` — MCP server framework
-- `better-sqlite3` — Chrome cookie DB access
+- `better-sqlite3` — optional legacy macOS Chrome cookie DB access; loaded only when used
+- `playwright` — browser login and query capture
 - `zod` — Tool schema validation
 
 ## Cookie Encryption (macOS Chrome)

@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import os from "node:os";
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 import type { FacebookCookie } from "./types.js";
 
 const CHROME_SALT = "saltysalt";
@@ -12,8 +14,8 @@ const CHROME_IV = Buffer.alloc(16, " ");
 
 function getChromePassword(): string {
   try {
-    return execSync(
-      'security find-generic-password -w -s "Chrome Safe Storage" -a "Chrome"',
+    return execFileSync(
+      "security", ["find-generic-password", "-w", "-s", "Chrome Safe Storage", "-a", "Chrome"],
       { stdio: ["pipe", "pipe", "pipe"] }
     )
       .toString()
@@ -80,14 +82,15 @@ export function extractChromeCookies(
   domain: string,
   profile = "Default"
 ): FacebookCookie[] {
+  if (process.platform !== "darwin") {
+    throw new Error("Automatic Chrome cookie extraction is only available on macOS. Run npm run login to create a session on Windows or Linux.");
+  }
   const cookiePath = getCookieDbPath(profile);
 
   // Chrome locks the DB while running — copy it first
   const tmpPath = path.join(os.tmpdir(), `chrome_cookies_${Date.now()}`);
   try {
-    execSync(`cp "${cookiePath}" "${tmpPath}"`, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    fs.copyFileSync(cookiePath, tmpPath);
   } catch {
     throw new Error(
       `Failed to copy Chrome cookie DB from ${cookiePath}. ` +
@@ -95,17 +98,17 @@ export function extractChromeCookies(
     );
   }
 
-  const password = getChromePassword();
-  const key = deriveChromeKey(password);
-
-  let db: Database.Database;
+  let db: Database.Database | undefined;
   try {
-    db = new Database(tmpPath, { readonly: true });
-  } catch {
-    throw new Error(`Failed to open cookie database at ${tmpPath}`);
-  }
-
-  try {
+    const password = getChromePassword();
+    const key = deriveChromeKey(password);
+    let Sqlite: typeof Database;
+    try {
+      Sqlite = createRequire(import.meta.url)("better-sqlite3");
+    } catch {
+      throw new Error("Chrome cookie extraction requires better-sqlite3. Use npm run login instead, or reinstall optional dependencies.");
+    }
+    db = new Sqlite(tmpPath, { readonly: true });
     const rows = db
       .prepare(
         `SELECT host_key, name, value, encrypted_value, path, expires_utc,
@@ -144,9 +147,9 @@ export function extractChromeCookies(
       };
     });
   } finally {
-    db.close();
+    db?.close();
     try {
-      execSync(`rm -f "${tmpPath}"`, { stdio: ["pipe", "pipe", "pipe"] });
+      fs.rmSync(tmpPath, { force: true });
     } catch {
       // cleanup failure is non-fatal
     }
