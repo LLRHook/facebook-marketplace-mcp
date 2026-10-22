@@ -58,6 +58,23 @@ try {
     assert.match(content(result), /not both/);
     return 'The tool rejects ambiguous units without contacting Facebook';
   });
+  await check('invalid tool inputs fail before authentication or storage writes', async () => {
+    for (const [name, args] of [
+      ['get_listing', { listing_id: '' }],
+      ['get_listing', { listing_id: '123/456' }],
+      ['search_location', { query: '  ' }],
+      ['monitor_search', { name: 'invalid', query: 'desk', latitude: 91, longitude: 0 }],
+      ['monitor_search', { name: 'invalid', query: 'desk', latitude: 0, longitude: 0, min_price: 20, max_price: 10 }],
+      ['check_monitors', { monitor_name: ' ' }],
+      ['delete_monitor', { name: ' ' }],
+    ]) {
+      const result = await local.callTool({ name, arguments: args });
+      assert.equal(result.isError, true, `${name}: ${content(result)}`);
+      assert.doesNotMatch(content(result), /npm run login/);
+    }
+    await assert.rejects(fs.stat(path.join(temporaryHome, '.fb-marketplace/monitors.json')), { code: 'ENOENT' });
+    return 'Seven invalid tool calls rejected with no monitor file created';
+  });
   await check('create a monitor', async () => {
     const result = await local.callTool({ name: 'monitor_search', arguments: { name: 'validation-only', query: 'desk', latitude: 40.7128, longitude: -74.0060 } });
     assert.notEqual(result.isError, true, content(result));
@@ -90,6 +107,23 @@ try {
     assert.notEqual(result.isError, true);
     assert.match(content(result), /No monitors saved/);
     return content(result);
+  });
+  await check('corrupt monitor storage is reported without overwriting saved bytes', async () => {
+    const file = path.join(temporaryHome, '.fb-marketplace/monitors.json');
+    const fixture = '{synthetic-private-monitor-data';
+    await fs.writeFile(file, fixture);
+    try {
+      for (const [name, args] of [
+        ['list_monitors', {}], ['check_monitors', {}], ['delete_monitor', { name: 'fixture' }],
+        ['monitor_search', { name: 'fixture', query: 'desk', latitude: 0, longitude: 0 }],
+      ]) {
+        const result = await local.callTool({ name, arguments: args });
+        assert.equal(result.isError, true, `${name}: ${content(result)}`);
+        assert.doesNotMatch(content(result), /synthetic-private-monitor-data/);
+        assert.equal(await fs.readFile(file, 'utf8'), fixture);
+      }
+    } finally { await fs.writeFile(file, '[]'); }
+    return 'All four monitor operations preserve the corrupt file and return sanitized tool errors';
   });
   for (const [name, args] of [
     ['search_listings', { query: 'desk', latitude: 40.7128, longitude: -74.0060, limit: 1 }],

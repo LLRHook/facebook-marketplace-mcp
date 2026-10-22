@@ -4,14 +4,18 @@ import type { FacebookClient } from "../facebook/client.js";
 export const searchLocationSchema = {
   query: z
     .string()
+    .trim().min(1).max(200)
     .describe(
       "Location search query (e.g. 'Dedham MA', 'Boston', 'Brooklyn NY')"
     ),
 };
 
-export function createLocationHandler(client: FacebookClient) {
-  return async (args: { query: string }) => {
+const inputSchema = z.object(searchLocationSchema);
+
+export function createLocationHandler(client: Pick<FacebookClient, "searchLocation">) {
+  return async (input: z.input<typeof inputSchema>) => {
     try {
+      const args = inputSchema.parse(input);
       const results = await client.searchLocation(args.query);
 
       if (results.length === 0) {

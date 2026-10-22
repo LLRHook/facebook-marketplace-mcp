@@ -99,12 +99,16 @@ Structured output includes the listing and a `priceReview`. It flags headline pr
 |-----------|------|----------|-------------|
 | `listing_id` | string | yes | Marketplace listing ID |
 
+Supply the listing ID alone, rather than its URL. Empty IDs and IDs containing URL separators are rejected before authentication.
+
 ### `search_location`
 Look up a city or town to obtain coordinates for `search_listings`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `query` | string | yes | City/town name, such as `New York NY` |
+
+Location phrases are trimmed and must contain 1–200 characters.
 
 ### `calculate_trip_deal`
 
@@ -131,8 +135,12 @@ Save a search as a monitor to track new listings over time.
 | `min_price` | number | no | Min price |
 | `max_price` | number | no | Max price |
 
+Monitor names and search phrases must be nonempty after trimming. Coordinates, radius and price bounds follow the same limits as `search_listings`; the minimum price cannot exceed the maximum. Monitor files are saved atomically. If saved data is corrupt or unreadable, monitor tools return an error and preserve it for recovery instead of replacing it with an empty collection.
+
 ### `check_monitors`
 Check one page per monitor for IDs not previously seen. These may be older listings; this is separate from Facebook's native saved-search notifications. A monitor runs only when called and does not provide complete or real-time alerts.
+
+When checking several monitors, a failed search is reported alongside successful results and does not prevent later monitors from running. Failed monitors keep their previous seen IDs and last-check timestamp. Duplicate IDs within a returned page are reported once.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
