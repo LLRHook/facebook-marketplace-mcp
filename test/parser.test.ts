@@ -78,6 +78,19 @@ test("a terminal search page can contain related searches and ads instead of lis
   assert.throws(() => parseSearchResponse(response(false, false)), /no recognizable listings/);
 });
 
+test("an intermediate page of recognized feed units preserves its continuation", () => {
+  const response = { data: { marketplace_search: { feed_units: {
+    edges: ["MarketplaceSearchRelatedSearchFeedUnit", "MarketplaceFeedAdStory"]
+      .map(__typename => ({ node: { __typename } })),
+    page_info: { has_next_page: true, end_cursor: "page-with-listings" },
+  } } } };
+  assert.deepEqual(parseSearchResponse(response), {
+    listings: [], hasNextPage: true, endCursor: "page-with-listings",
+  });
+  response.data.marketplace_search.feed_units.edges[0].node.__typename = "UnknownNewFeedUnit";
+  assert.throws(() => parseSearchResponse(response), /no recognizable listings/);
+});
+
 test("malformed optional dates do not discard a valid listing", () => {
   const result = parseSearchResponse({ data: { marketplace_search: { feed_units: {
     edges: [{ node: { ...listing, creation_time: 1e100 } }],

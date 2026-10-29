@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { FacebookClient } from "../facebook/client.js";
+import { searchListingsSchema } from "./search.js";
 import {
   addMonitor,
   loadMonitors,
@@ -8,42 +9,41 @@ import {
   deleteMonitor,
 } from "../storage/monitors.js";
 
+const monitorName = z.string().trim().min(1).max(200);
+
 export const monitorSearchSchema = {
-  name: z.string().describe("Name for this saved search monitor"),
-  query: z.string().describe("Search query"),
-  latitude: z.number().describe("Latitude of search center"),
-  longitude: z.number().describe("Longitude of search center"),
-  radius_km: z.number().default(50).describe("Search radius in km"),
-  min_price: z.number().optional().describe("Min price filter in dollars"),
-  max_price: z.number().optional().describe("Max price filter in dollars"),
-  category: z.string().optional().describe("Category ID"),
+  name: monitorName.describe("Name for this saved search monitor"),
+  query: searchListingsSchema.query,
+  latitude: searchListingsSchema.latitude,
+  longitude: searchListingsSchema.longitude,
+  radius_km: searchListingsSchema.radius_km.default(50),
+  min_price: searchListingsSchema.min_price,
+  max_price: searchListingsSchema.max_price,
+  category: searchListingsSchema.category,
 };
 
 export const checkMonitorsSchema = {
-  monitor_name: z
-    .string()
+  monitor_name: monitorName
     .optional()
     .describe("Check a specific monitor by name, or omit to check all"),
 };
 
 export const deleteMonitorSchema = {
-  name: z.string().describe("Name of the monitor to delete"),
+  name: monitorName.describe("Name of the monitor to delete"),
 };
 
 export const listMonitorsSchema = {};
 
+const monitorInput = z.object(monitorSearchSchema).refine(args =>
+  args.min_price === undefined || args.max_price === undefined || args.min_price <= args.max_price,
+  { message: "min_price cannot exceed max_price." });
+const checkInput = z.object(checkMonitorsSchema);
+const deleteInput = z.object(deleteMonitorSchema);
+
 export function createMonitorSearchHandler() {
-  return async (args: {
-    name: string;
-    query: string;
-    latitude: number;
-    longitude: number;
-    radius_km: number;
-    min_price?: number;
-    max_price?: number;
-    category?: string;
-  }) => {
+  return async (input: z.input<typeof monitorInput>) => {
     try {
+      const args = monitorInput.parse(input);
       const monitor = addMonitor(args.name, {
         query: args.query,
         latitude: args.latitude,
@@ -77,9 +77,10 @@ export function createMonitorSearchHandler() {
   };
 }
 
-export function createCheckMonitorsHandler(client: FacebookClient) {
-  return async (args: { monitor_name?: string }) => {
+export function createCheckMonitorsHandler(client: Pick<FacebookClient, "searchListings">) {
+  return async (input: z.input<typeof checkInput>) => {
     try {
+      const args = checkInput.parse(input);
       const monitors = args.monitor_name
         ? [getMonitor(args.monitor_name)].filter(Boolean)
         : loadMonitors();
@@ -98,39 +99,41 @@ export function createCheckMonitorsHandler(client: FacebookClient) {
       }
 
       const results: string[] = [];
+      let hasErrors = false;
 
       for (const monitor of monitors) {
         if (!monitor) continue;
 
-        const searchResult = await client.searchListings(monitor.params);
-        const newListings = searchResult.listings.filter(
-          (l) => !monitor.seenIds.includes(l.id)
-        );
+        try {
+          const searchResult = await client.searchListings(monitor.params);
+          const seen = new Set(monitor.seenIds);
+          const newListings = searchResult.listings.filter(listing => {
+            if (seen.has(listing.id)) return false;
+            seen.add(listing.id);
+            return true;
+          });
+          updateMonitorSeenIds(monitor.name, newListings.map(listing => listing.id));
 
-        if (newListings.length > 0) {
-          updateMonitorSeenIds(
-            monitor.name,
-            newListings.map((l) => l.id)
-          );
-
-          const listingSummary = newListings
-            .map(
-              (l, i) =>
-                `  ${i + 1}. **${l.title}** — ${l.price}\n     📍 ${l.location}\n     🔗 ${l.url}`
-            )
-            .join("\n\n");
-
-          results.push(
-            `### 🔔 ${monitor.name} — ${newListings.length} listing(s) new to this monitor\n\n${listingSummary}`
-          );
-        } else {
-          updateMonitorSeenIds(monitor.name, []);
-          results.push(`### ${monitor.name} — no new listings`);
+          if (newListings.length > 0) {
+            const listingSummary = newListings
+              .map((listing, index) =>
+                `  ${index + 1}. **${listing.title}** — ${listing.price}\n     📍 ${listing.location}\n     🔗 ${listing.url}`)
+              .join("\n\n");
+            results.push(
+              `### 🔔 ${monitor.name} — ${newListings.length} listing(s) new to this monitor\n\n${listingSummary}`
+            );
+          } else {
+            results.push(`### ${monitor.name} — no new listings`);
+          }
+        } catch (error) {
+          hasErrors = true;
+          results.push(`### ${monitor.name} — check failed\n${error instanceof Error ? error.message : String(error)}`);
         }
       }
 
       return {
         content: [{ type: "text" as const, text: `${results.join("\n\n---\n\n")}\n\nEach monitor checks one result page. Newly seen IDs are not necessarily newly posted listings; this does not provide complete or real-time alerts.` }],
+        ...(hasErrors ? { isError: true } : {}),
       };
     } catch (error) {
       return {
@@ -147,44 +150,47 @@ export function createCheckMonitorsHandler(client: FacebookClient) {
 }
 
 export function createDeleteMonitorHandler() {
-  return async (args: { name: string }) => {
-    const deleted = deleteMonitor(args.name);
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: deleted
-            ? `Monitor "${args.name}" deleted.`
-            : `Monitor "${args.name}" not found.`,
-        },
-      ],
-    };
+  return async (input: z.input<typeof deleteInput>) => {
+    try {
+      const args = deleteInput.parse(input);
+      const deleted = deleteMonitor(args.name);
+      return { content: [{ type: "text" as const, text: deleted
+        ? `Monitor "${args.name}" deleted.` : `Monitor "${args.name}" not found.` }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const,
+        text: `Error deleting monitor: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+    }
   };
 }
 
 export function createListMonitorsHandler() {
   return async () => {
-    const monitors = loadMonitors();
-    if (monitors.length === 0) {
+    try {
+      const monitors = loadMonitors();
+      if (monitors.length === 0) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "No monitors saved. Use monitor_search to create one.",
+            },
+          ],
+        };
+      }
+
+      const list = monitors
+        .map(
+          (m) =>
+            `- **${m.name}** — "${m.params.query}" (${m.params.radiusKm}km)\n  Created: ${m.createdAt}${m.lastChecked ? ` | Last checked: ${m.lastChecked}` : ""}\n  Seen: ${m.seenIds.length} listings`
+        )
+        .join("\n\n");
+
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: "No monitors saved. Use monitor_search to create one.",
-          },
-        ],
+        content: [{ type: "text" as const, text: `## Saved Monitors\n\n${list}` }],
       };
+    } catch (error) {
+      return { content: [{ type: "text" as const,
+        text: `Error listing monitors: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
     }
-
-    const list = monitors
-      .map(
-        (m) =>
-          `- **${m.name}** — "${m.params.query}" (${m.params.radiusKm}km)\n  Created: ${m.createdAt}${m.lastChecked ? ` | Last checked: ${m.lastChecked}` : ""}\n  Seen: ${m.seenIds.length} listings`
-      )
-      .join("\n\n");
-
-    return {
-      content: [{ type: "text" as const, text: `## Saved Monitors\n\n${list}` }],
-    };
   };
 }

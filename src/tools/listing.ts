@@ -3,12 +3,16 @@ import type { FacebookClient } from "../facebook/client.js";
 import { analyzePrice } from "../facebook/listing-analysis.js";
 
 export const getListingSchema = {
-  listing_id: z.string().describe("Facebook Marketplace listing ID"),
+  listing_id: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/)
+    .describe("Facebook Marketplace listing ID, not a listing URL"),
 };
 
-export function createListingHandler(client: FacebookClient) {
-  return async (args: { listing_id: string }) => {
+const inputSchema = z.object(getListingSchema);
+
+export function createListingHandler(client: Pick<FacebookClient, "getListingDetail">) {
+  return async (input: z.input<typeof inputSchema>) => {
     try {
+      const args = inputSchema.parse(input);
       const listing = await client.getListingDetail(args.listing_id);
       const priceReview = analyzePrice(listing, listing.description);
 

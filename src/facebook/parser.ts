@@ -115,12 +115,18 @@ export function parseSearchResponse(response: unknown): SearchResult {
     .map(listingFromEdge)
     .filter(isListing)
     .map(normalizeListing) as MarketplaceListing[];
+  const pageInfo = connection.page_info;
+  // Ads and related-search units can occupy a whole intermediate page. Retain
+  // its cursor, but do not turn unknown/malformed story types into empty success.
+  const nonListingPage = pageInfo?.has_next_page === true &&
+    typeof pageInfo.end_cursor === "string" && pageInfo.end_cursor.trim().length > 0 &&
+    connection.edges.every((edge: unknown) => isObject(edge) && isObject(edge.node) &&
+      ["MarketplaceSearchRelatedSearchFeedUnit", "MarketplaceFeedAdStory"].includes(edge.node.__typename));
   if (connection.edges.length > 0 && listings.length === 0 &&
-      !hasNoResultsStory(connection) && !(connection.page_info?.has_next_page === false &&
+      !nonListingPage && !hasNoResultsStory(connection) && !(pageInfo?.has_next_page === false &&
         hasNoResultsStory(connection, "MarketplaceSearchFeedEndOfResults"))) {
     throw new Error("Marketplace search contained no recognizable listings.");
   }
-  const pageInfo = connection.page_info;
   if (pageInfo != null && (!isObject(pageInfo) ||
       (pageInfo.has_next_page != null && typeof pageInfo.has_next_page !== "boolean") ||
       (pageInfo.end_cursor != null && typeof pageInfo.end_cursor !== "string"))) {

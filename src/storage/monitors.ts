@@ -2,10 +2,31 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { z } from "zod";
 import type { SavedMonitor, SearchParams } from "../facebook/types.js";
 
 const STORAGE_DIR = path.join(os.homedir(), ".fb-marketplace");
 const MONITORS_FILE = path.join(STORAGE_DIR, "monitors.json");
+
+const monitorSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  params: z.object({
+    query: z.string().min(1),
+    latitude: z.number().finite().min(-90).max(90),
+    longitude: z.number().finite().min(-180).max(180),
+    radiusKm: z.number().finite().positive(),
+    minPrice: z.number().finite().nonnegative().optional(),
+    maxPrice: z.number().finite().nonnegative().optional(),
+    category: z.string().optional(),
+    limit: z.number().int().min(1).max(100),
+    delivery: z.enum(["all", "local_pickup", "shipping"]).optional(),
+  }).refine(params => params.minPrice === undefined || params.maxPrice === undefined ||
+    params.minPrice <= params.maxPrice),
+  seenIds: z.array(z.string().min(1)),
+  createdAt: z.string().datetime(),
+  lastChecked: z.string().datetime().nullable(),
+});
 
 function ensureStorageDir() {
   if (!fs.existsSync(STORAGE_DIR)) {
@@ -14,21 +35,28 @@ function ensureStorageDir() {
 }
 
 export function loadMonitors(): SavedMonitor[] {
-  ensureStorageDir();
-  if (!fs.existsSync(MONITORS_FILE)) {
-    return [];
-  }
   try {
     const data = fs.readFileSync(MONITORS_FILE, "utf-8");
-    return JSON.parse(data);
-  } catch {
-    return [];
+    const parsed: unknown = JSON.parse(data);
+    if (!z.array(monitorSchema).safeParse(parsed).success) {
+      throw new Error("Invalid monitor data");
+    }
+    return parsed as SavedMonitor[];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw new Error("Could not read saved monitors. Check the monitor file and restore a valid backup before retrying; existing data has not been changed.");
   }
 }
 
 export function saveMonitors(monitors: SavedMonitor[]) {
   ensureStorageDir();
-  fs.writeFileSync(MONITORS_FILE, JSON.stringify(monitors, null, 2));
+  const temporary = `${MONITORS_FILE}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(monitors, null, 2), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, MONITORS_FILE);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
 }
 
 export function addMonitor(
